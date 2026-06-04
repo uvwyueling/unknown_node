@@ -17,6 +17,24 @@ def test_数据可视化_应该连着数据分析():
 
 # —— 风味二：不变量型（对任何输入都必须成立，不需要我懂领域）——
 
+# ── score_node 测试 ──────────────────────────────────────────────────────────
+
+def test_score_node_数据分析比陶器更接近目标():
+    # 从 Data visualization 出发、目标 Machine learning：
+    # Data analysis 与两者都强相关，Pottery 与两者几乎无关。
+    from pipeline import score_node
+    score_相关 = score_node("Data analysis", "Data visualization", "Machine learning")
+    score_无关 = score_node("Pottery", "Data visualization", "Machine learning")
+    assert score_相关 > score_无关
+
+
+def test_score_node_返回值在合法区间():
+    # 不变量：任何输入的得分都必须在 [0, 1]
+    from pipeline import score_node
+    s = score_node("Data analysis", "Data visualization", "Machine learning")
+    assert 0.0 <= s <= 1.0
+
+
 @pytest.mark.skip(reason="get_rings 尚未实现")
 def test_get_rings_的不变量():
     from pipeline import get_rings
