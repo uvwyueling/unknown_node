@@ -209,6 +209,17 @@ def test_get_rings_节点均来自Wikipedia真实链接():
         assert 节点 in 真实邻居, f"发明了节点：{节点!r}"
 
 
+def test_get_rings_圈里出现朝向终点的桥梁词():
+    # 例子型：证明候选截断的病已根治——全部 ~125 个邻居都进入打分后，
+    # 朝向终点（Convolutional neural network）的桥梁词应能凭分数浮现到圈里。
+    # 旧实现里 _CANDIDATE_CAP=20 会把排在 20 名开外的桥梁词切掉。
+    from pipeline import get_rings
+    result = get_rings("Data visualization", "Convolutional neural network")
+    圈内 = set(result["内圈"] + result["外圈"])
+    桥梁 = {"Data science", "Regression analysis"}
+    assert 圈内 & 桥梁, f"圈里没有任何桥梁词，截断的病可能复发：{sorted(圈内)}"
+
+
 def test_get_rings_的不变量():
     # 不变量型：对任何输入，结构承诺必须成立
     from pipeline import get_rings

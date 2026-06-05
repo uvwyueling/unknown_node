@@ -24,7 +24,7 @@ _W2 = 0.4   # 分类 Jaccard 重叠（语义距离）
 _INNER_SIZE    = 5     # 内圈最多词条数
 _OUTER_SIZE    = 10    # 外圈最多词条数
 _MMR_LAMBDA    = 0.7   # λ：越大越偏相关性，越小越偏多样性
-_CANDIDATE_CAP = 20    # 最多对多少候选词做完整 score_node
+# 注：不再有候选截断——打分只用批量缓存的分类数据，全部邻居都进入打分
 
 # 全局限速：两次 HTTP 请求之间的最小间隔（秒）
 _REQUEST_INTERVAL = 0.25
@@ -417,13 +417,9 @@ def fetch_neighbors(node: str) -> list[str]:
 # 打分层内部工具（不对外暴露）
 # ─────────────────────────────────────────────
 
-@functools.lru_cache(maxsize=512)
-def _neighbors_set(node: str) -> frozenset[str]:
-    """fetch_neighbors 的缓存版，返回 frozenset 供集合运算。"""
-    return frozenset(fetch_neighbors(node))
-
-
 # 分类缓存：手工 dict，方便批量预填（替代 lru_cache）
+# 打分层三个维度（A 候选↔当前、B 候选↔终点、C 候选↔已选）全部基于分类数据，
+# 由 _load_categories_batch 一次性批量预取，不再逐个下载候选整页。
 _cat_cache: dict[str, frozenset[str]] = {}
 
 
@@ -561,13 +557,14 @@ def score_node(候选: str, 当前: str, 终点: str) -> float:
     计算候选词条的路径相关性得分。
 
     rel = w1 × A  +  w2 × B
-      A：候选 与 当前  的邻居 Jaccard 重叠       → 越大说明两词条在图里越近
+      A：候选 与 当前  的分类 Jaccard 重叠       → 越大说明两词条语义越接近
       B：候选 到 终点  的分类树接近度             → 越大说明候选越靠近目标语义区
          （层 0 = 1.0 / 层 1 = 0.5 / 层 2 = 0.25 / 未找到 = 0.0）
 
+    两个维度都只用已批量缓存的分类数据，不再逐个下载候选整页。
     返回值 ∈ [0.0, 1.0]。
     """
-    A = _jaccard(_neighbors_set(候选), _neighbors_set(当前))
+    A = _jaccard(_fetch_categories(候选), _fetch_categories(当前))
     B = _category_proximity(候选, 终点)
     return _W1 * A + _W2 * B
 
@@ -593,6 +590,8 @@ def get_rings(当前: str, 终点: str) -> dict:
       全部节点无重复
       所有节点均来自 fetch_neighbors 的真实返回（不发明节点）
     """
+    print(f"正在为 {当前} 搭桥…")
+
     # ① 取数层拿邻居——编排层不直接调 Wikipedia API（红线 1）
     raw        = fetch_neighbors(当前)
     candidates = [c for c in raw if c != 当前]   # 去掉自引用
@@ -600,18 +599,18 @@ def get_rings(当前: str, 终点: str) -> dict:
     if not candidates:
         return {"中心": 当前, "内圈": [], "外圈": []}
 
-    # ② 限制候选数，控制 API 调用量
-    candidates = candidates[:_CANDIDATE_CAP]
+    # ② 批量预取「全部候选 + 当前 + 终点」的分类（几次批量请求即可，每批 50 个标题）
+    #    打分（维度 A/B/C）只用分类数据、不再逐个下载整页，所以这里不再截断候选，
+    #    让上百个邻居全部进入打分——桥梁词（Data science / Regression analysis 等）
+    #    不会再被候选截断切掉。
+    _load_categories_batch(candidates + [当前, 终点])
 
-    # ③ 批量预取所有候选 + 终点 的分类（1 次 API 调用代替 20 次）
-    _load_categories_batch(candidates + [终点])
-
-    # ④ 打分层对每个候选打完整分数
+    # ③ 打分层对每个候选打完整分数
     scores: dict[str, float] = {
         c: score_node(c, 当前, 终点) for c in candidates
     }
 
-    # ⑤ MMR 循环：每轮从 remaining 中选 MMR 得分最高的词条
+    # ④ MMR 循环：每轮从 remaining 中选 MMR 得分最高的词条
     total     = min(_INNER_SIZE + _OUTER_SIZE, len(candidates))
     selected: list[str] = []
     remaining = list(candidates)
@@ -624,11 +623,11 @@ def get_rings(当前: str, 终点: str) -> dict:
             # 第一轮：直接选相关性最高的
             best = max(remaining, key=lambda c: scores[c])
         else:
-            # 后续轮：MMR = λ × rel − (1−λ) × max_与已选的邻居相似度
+            # 后续轮：MMR = λ × rel − (1−λ) × max_与已选的分类相似度
             def _mmr(c: str) -> float:
                 rel     = scores[c]
                 max_sim = max(
-                    _jaccard(_neighbors_set(c), _neighbors_set(s))
+                    _jaccard(_fetch_categories(c), _fetch_categories(s))
                     for s in selected       # selected 是同一对象，随循环增长
                 )
                 return _MMR_LAMBDA * rel - (1 - _MMR_LAMBDA) * max_sim
@@ -638,7 +637,7 @@ def get_rings(当前: str, 终点: str) -> dict:
         selected.append(best)
         remaining.remove(best)
 
-    # ⑥ 切圈：inner_n = min(_INNER_SIZE, len//2) 保证 内圈 ≤ 外圈
+    # ⑤ 切圈：inner_n = min(_INNER_SIZE, len//2) 保证 内圈 ≤ 外圈
     #    偶数时两圈相等，奇数时内圈少一个，均满足 ≤
     inner_n = min(_INNER_SIZE, len(selected) // 2)
     内圈 = selected[:inner_n]
