@@ -19,7 +19,7 @@
 ## 五层架构（本表是唯一真相源；改架构，先改这张表）
 | 层 | 内部操作 | 函数契约 | 传出 → 下一层 |
 |--|--|--|--|
-| 取数层 | 调 MediaWiki API，只取 See also 段落和信息框里 Related topics / Fields 行的链接 | `fetch_neighbors(node) -> [str, ...]` | 邻居列表 |
+| 取数层 | 调 MediaWiki API（取渲染后 HTML），取三处链接：① See also 段；② 信息框/系列侧栏的所有**概念行**（Major dimensions / Related topics / Fields 等，**排除人物 figures 行**）；③ 导语段(lead)正文。再过一道停用词过滤（剔除 `List of…` 前缀、明显产品名、`(software)`/`(company)` 后缀，及策展列表里手写的小写品牌名）。**不取全部页面链接。** | `fetch_neighbors(node) -> [str, ...]` | 邻居列表 |
 | 打分层 | 每个邻居算 rel = w1×A + w2×B（A=Jaccard 邻居重叠；B=到 input_02 的分类树距离） | `score_node(候选, 当前, 终点) -> float` | [{词, rel}, ...] |
 | 编排层 | 用 MMR 循环挑选（多样性在此发力），切内圈 / 外圈 | `get_rings(当前, 终点) -> {中心, 内圈:[...], 外圈:[...]}` | 两圈 |
 | 记忆层 | 记录：给了哪些候选、用户选了什么、没选什么 | `save_step(step)` | 用户的选择 |
@@ -39,7 +39,7 @@
 2. Execute：一次只实现一个函数契约，不许一口气写整条 pipeline
 3. Verify（两道闸，都要过）：
    - 行为：跑 `pytest`，行为测试必须通过。
-     例：`fetch_neighbors("Data visualization")` 的返回里必须含 `"Data analysis"`（已在 Wikipedia 亲眼核实这条链接为真）。
+     例：`fetch_neighbors("Data visualization")` 的返回里必须含 `"Data science"`（朝向终点的真实桥梁词），且必须不含 `"Imc FAMOS"`（产品噪音）——已在 Wikipedia 亲眼核实。
    - 构建：前端跑 `npm run build`，失败则修复直到通过。
    - build 通过只是底线，行为测试通过才算"做对"。
 
@@ -49,10 +49,13 @@
 
 ```python
 # —— 风味一：例子型（锚定一条我亲眼核实过的真实事实）——
-def test_数据可视化_应该连着回归分析():
-    # 已在 Wikipedia 的 "Data visualization" 页面亲眼核实这条链接为真
+def test_数据可视化_含桥梁词_不含产品噪音():
+    # 已在 Wikipedia 亲眼核实（"Data visualization" 重定向到 "Data and information visualization"）：
+    # "Data science" 在侧栏 Major dimensions 行（朝向终点的桥梁），必须取到；
+    # "Imc FAMOS" 是产品噪音，必须被停用词过滤剔除。
     result = fetch_neighbors("Data visualization")
-    assert "Regression analysis" in result
+    assert "Data science" in result
+    assert "Imc FAMOS" not in result
 
 
 # —— 风味二：不变量型（对任何输入都必须成立，不需要我懂领域）——

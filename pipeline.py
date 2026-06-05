@@ -178,20 +178,62 @@ def _api_get(params: dict) -> dict:
 # 取数层
 # ─────────────────────────────────────────────
 
-# 只从信息框/侧栏的这些行里取链接（严格语义，见与用户的约定）
-_INFOBOX_ROW_LABELS = {"related topics", "fields"}
+# 标准信息框里，认作「概念行」的标签白名单（这类信息框还混着生卒/网站等非概念行，
+# 故用白名单而非黑名单）。系列侧栏则相反：默认全要，只黑掉人物行。
+_INFOBOX_CONCEPT_LABELS = {
+    "fields", "field", "related topics", "related fields",
+    "subfields", "domains", "domain", "topics and fields",
+}
+
+# 系列侧栏里要排除的「人物/figures」行（按标签关键词匹配，大小写不敏感）
+_FIGURE_ROW_PAT = re.compile(
+    r"figure|people|person|scientist|researcher|pioneer|notable", re.I
+)
+
+# 停用词：明显的产品/公司名（手工维护，可继续补充）。
+# 另有两条规则化过滤见 _is_noise：① "List of…" 前缀 ② (software)/(company) 等产品后缀。
+# 还有一条「显示文本小写开头」（手写品牌名，如 [[imc FAMOS]]）在 _extract_article_links
+# 里只对策展列表（See also/侧栏）生效——因为导语段里 [[map]]→"maps" 的小写是句子流，不是品牌。
+_PRODUCT_DENYLIST = {
+    "Adobe Inc.", "Adobe Systems", "Adobe Illustrator", "Adobe Photoshop",
+    "Microsoft Excel", "Microsoft Power BI", "Tableau Software",
+    "Google Charts", "D3.js",
+}
 
 
-def _extract_article_links(html_fragment: str) -> list[str]:
+def _is_noise(title: str) -> bool:
+    """停用词过滤（基于词条标题，全部来源通用）：List of… 列表页、产品名单、产品后缀。"""
+    if title in _PRODUCT_DENYLIST:
+        return True
+    if re.match(r"(?i)^lists? of\b", title):     # "List of …" / "Lists of …"
+        return True
+    if re.search(                                # "X (software)" / "X (company)" …
+        r"(?i)\((software|company|operating system|programming language)\)$", title
+    ):
+        return True
+    return False
+
+
+def _extract_article_links(html_fragment: str, *, curated: bool = False) -> list[str]:
     """
     从一段渲染后的 HTML 中，按出现顺序抽出指向 Wikipedia 正文文章的链接标题。
     · 只认 /wiki/<Title> 形式（正文链接），忽略 /w/index.php?... 这类编辑链接
     · 跳过带命名空间前缀的链接（File: / Category: / Help: 等），它们是噪音
+    · 过滤 _is_noise（List of… / 产品名 / 产品后缀）
+    · curated=True（策展列表：See also、侧栏）时，额外剔除显示文本小写开头的手写
+      品牌名（如 [[imc FAMOS]]）；导语段用 curated=False，避免误杀句中小写的 [[map]] 等。
     """
     out: list[str] = []
-    for m in re.finditer(r'<a\b[^>]*href="/wiki/([^"#]+)"', html_fragment):
-        title = unquote(m.group(1)).replace("_", " ").strip()
+    for m in re.finditer(
+        r'<a\b[^>]*href="/wiki/([^"#]+)"[^>]*>(.*?)</a>', html_fragment, re.S
+    ):
+        title   = unquote(m.group(1)).replace("_", " ").strip()
+        display = re.sub(r"<[^>]+>", "", m.group(2)).strip()   # 链接显示文本
         if not title or ":" in title:
+            continue
+        if _is_noise(title):
+            continue
+        if curated and display[:1].islower():   # 列表里手写的小写品牌名 → 噪音
             continue
         out.append(title)
     return out
@@ -205,43 +247,62 @@ def _extract_see_also(html: str) -> list[str]:
     rest = html[m.end():]
     nxt = re.search(r"<h2\b", rest)
     segment = rest[: nxt.start()] if nxt else rest
-    return _extract_article_links(segment)
+    return _extract_article_links(segment, curated=True)
 
 
 def _extract_infobox_rows(html: str) -> list[str]:
     """
-    抽出信息框/系列侧栏里 Related topics / Fields 行的链接。
+    抽出信息框/系列侧栏里「概念行」的链接，排除人物/figures 行。
     覆盖两种真实结构：
       (a) 系列侧栏：<th class="sidebar-heading">标签</th> 单独一行，
                     紧跟 <td class="sidebar-content">…链接…</td> 另一行
-      (b) 标准信息框：<th class="infobox-label">标签</th><td class="infobox-data">…</td> 同一行
+                    —— 默认全取（Major dimensions / Related topics / Information
+                       graphic types / Topics and fields …），只跳过人物行
+                       （Important figures 等）。
+      (b) 标准信息框：<th class="infobox-label">标签</th><td class="infobox-data">…</td>
+                    —— 这类框混着生卒/网站等非概念行，故只取白名单标签
+                       （Fields / Related topics / Subfields …）。
     """
     links: list[str] = []
 
-    # (a) 系列侧栏：标签行与内容行分开
+    # (a) 系列侧栏：默认全取概念行，黑掉人物行
     for m in re.finditer(
         r'<th[^>]*class="[^"]*sidebar-heading[^"]*"[^>]*>(.*?)</th>', html, re.S
     ):
-        label = re.sub(r"<[^>]+>", "", m.group(1)).strip().lower()
-        if label in _INFOBOX_ROW_LABELS:
-            after = html[m.end():]
-            td = re.search(
-                r'<td[^>]*class="[^"]*sidebar-content[^"]*"[^>]*>(.*?)</td>',
-                after, re.S,
-            )
-            if td:
-                links += _extract_article_links(td.group(1))
+        label = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+        if _FIGURE_ROW_PAT.search(label):          # Important figures → 跳过
+            continue
+        after = html[m.end():]
+        td = re.search(
+            r'<td[^>]*class="[^"]*sidebar-content[^"]*"[^>]*>(.*?)</td>',
+            after, re.S,
+        )
+        if td:
+            links += _extract_article_links(td.group(1), curated=True)
 
-    # (b) 标准信息框：标签与数据在同一行
+    # (b) 标准信息框：只取白名单概念标签
     for m in re.finditer(
         r'<th[^>]*class="[^"]*infobox-label[^"]*"[^>]*>(.*?)</th>\s*'
         r'<td[^>]*class="[^"]*infobox-data[^"]*"[^>]*>(.*?)</td>',
         html, re.S,
     ):
         label = re.sub(r"<[^>]+>", "", m.group(1)).strip().lower()
-        if label in _INFOBOX_ROW_LABELS:
-            links += _extract_article_links(m.group(2))
+        if label in _INFOBOX_CONCEPT_LABELS:
+            links += _extract_article_links(m.group(2), curated=True)
 
+    return links
+
+
+def _extract_lead(html: str) -> list[str]:
+    """
+    抽出导语段（lead section）正文里的链接：即第一个 <h2> 之前、各 <p> 段落中的链接。
+    只取 <p> 段落，天然避开同处于导语区的信息框/侧栏表格（它们用 <table>/<li>，不是 <p>）。
+    """
+    m = re.search(r"<h2\b", html)
+    lead = html[: m.start()] if m else html
+    links: list[str] = []
+    for p in re.finditer(r"<p\b[^>]*>(.*?)</p>", lead, re.S):
+        links += _extract_article_links(p.group(1))
     return links
 
 
@@ -250,12 +311,16 @@ def _fetch_neighbors_online(node: str) -> list[str]:
     取数层的「联网 worker」——真正下载整页 HTML 并解析的那一层（慢）。
     不要直接调用它；外部统一走带磁盘缓存的 fetch_neighbors。
 
-    只取两处人工策展的链接，避开导航框/人名/正文噪音：
-      · See also 段落里的全部文章链接
-      · 信息框 / 系列侧栏里 Related topics、Fields 行的链接
+    取三处人工策展/概念性的链接，避开导航框人名、图说、产品名噪音：
+      · See also 段落
+      · 信息框 / 系列侧栏的所有概念行（Major dimensions / Related topics /
+        Fields 等），但排除人物 figures 行
+      · 导语段（lead section）正文段落
 
-    实现：取渲染后的 HTML（action=parse，自动跟随重定向），再定位上述两处。
-    返回结果去重、保序，并剔除指向词条自身的链接。
+    再过一道停用词过滤（_is_noise）：剔除 "List of…" 列表页、明显产品名、品牌式小写开头标题。
+
+    实现：取渲染后的 HTML（action=parse，自动跟随重定向），再定位上述三处。
+    返回结果去重、保序，剔除指向词条自身的链接。
     词条不存在或无解析结果时，返回空列表（不向用户抛原始报错，红线 3）。
     """
     params = {
@@ -275,9 +340,14 @@ def _fetch_neighbors_online(node: str) -> list[str]:
     html     = parse["text"]
     resolved = parse.get("title", node)   # 重定向后的真实标题
 
-    raw = _extract_see_also(html) + _extract_infobox_rows(html)
+    raw = (
+        _extract_see_also(html)
+        + _extract_infobox_rows(html)
+        + _extract_lead(html)
+    )
 
-    # 去重保序，并去掉指向自身（原名或重定向后名）的链接
+    # 去重保序，并去掉指向自身（原名/重定向后名）的链接
+    # （停用词噪音已在 _extract_article_links 里按来源过滤完毕）
     seen: set[str] = set()
     out:  list[str] = []
     for title in raw:

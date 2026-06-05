@@ -9,11 +9,23 @@ from pipeline import fetch_neighbors
 
 # —— 风味一：例子型（锚定一条我亲眼核实过的真实事实）——
 
+def test_数据可视化_含朝向终点的桥梁词_不含产品噪音():
+    # 已在 Wikipedia 亲眼核实（"Data visualization" 重定向到
+    # "Data and information visualization"）：
+    #   · "Data science" 在系列侧栏 "Major dimensions" 行里——它是朝向终点
+    #     （Convolutional neural network）的真实桥梁词，必须被取到；
+    #   · "imc FAMOS"（侧栏 See also 段里手写的小写品牌名，词条标题 "Imc FAMOS"）
+    #     是产品噪音，必须被停用词过滤剔除。
+    result = fetch_neighbors("Data visualization")
+    assert "Data science" in result          # 桥梁词，必须有
+    assert "Imc FAMOS" not in result          # 产品噪音，必须没有
+    assert "imc FAMOS" not in result
+
+
 def test_数据可视化_的相关主题里有回归分析():
     # 已在 Wikipedia 亲眼核实：
     # "Data visualization" 重定向到 "Data and information visualization"，
     # 其右侧系列侧栏的 "Related topics" 行里含 "Regression analysis"。
-    # （取数层只取 See also + 信息框 Related topics / Fields 行，不取全部页面链接。）
     result = fetch_neighbors("Data visualization")
     assert "Regression analysis" in result
 
