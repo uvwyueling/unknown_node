@@ -19,7 +19,7 @@
 ## 五层架构（本表是唯一真相源；改架构，先改这张表）
 | 层 | 内部操作 | 函数契约 | 传出 → 下一层 |
 |--|--|--|--|
-| 取数层 | 调 MediaWiki API，取中心词条链接到的页面 + See also | `fetch_neighbors(node) -> [str, ...]` | 邻居列表 |
+| 取数层 | 调 MediaWiki API，只取 See also 段落和信息框里 Related topics / Fields 行的链接 | `fetch_neighbors(node) -> [str, ...]` | 邻居列表 |
 | 打分层 | 每个邻居算 rel = w1×A + w2×B（A=Jaccard 邻居重叠；B=到 input_02 的分类树距离） | `score_node(候选, 当前, 终点) -> float` | [{词, rel}, ...] |
 | 编排层 | 用 MMR 循环挑选（多样性在此发力），切内圈 / 外圈 | `get_rings(当前, 终点) -> {中心, 内圈:[...], 外圈:[...]}` | 两圈 |
 | 记忆层 | 记录：给了哪些候选、用户选了什么、没选什么 | `save_step(step)` | 用户的选择 |
@@ -28,11 +28,11 @@
 注：input_02（终点）作为参数贯穿打分层与编排层；取数层不使用它，只向下传递。
 
 
-## 三条红线（不可违反）
+## 四条红线（不可违反）
 1. 层不许越界：上层只能通过下层的函数契约拿数据。`get_rings` 不许直接连 Wikipedia，必须通过 `fetch_neighbors`。
 2. 不许发明节点：打分层、编排层只能操作取数层给出的真实词条。（将来打分层接 LLM 时，必须用代码核对 LLM 返回的每个词都在传入列表里，不在的丢弃——这道栅栏放在编排层入口。）
 3. 外部输入先验证再用：Wikipedia 返回可能为空 / 报错 / 上百条，处理后再用；错误包装成友好提示，不把原始报错丢给用户。
-
+4. 时间戳一律存 UTC 的 ISO 8601 字符串(datetime.now(timezone.utc).isoformat());本地时间只在呈现层显示时转换。
 
 ## PEV 工作流
 1. Plan：列出输入 / 输出 / 错误场景
@@ -49,10 +49,10 @@
 
 ```python
 # —— 风味一：例子型（锚定一条我亲眼核实过的真实事实）——
-def test_数据可视化_应该连着数据分析():
+def test_数据可视化_应该连着回归分析():
     # 已在 Wikipedia 的 "Data visualization" 页面亲眼核实这条链接为真
     result = fetch_neighbors("Data visualization")
-    assert "Data analysis" in result
+    assert "Regression analysis" in result
 
 
 # —— 风味二：不变量型（对任何输入都必须成立，不需要我懂领域）——
