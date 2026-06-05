@@ -199,6 +199,35 @@ def test_render_rings_点击绑定不被引号破坏():
     assert "button[data-word]" in html
 
 
+def test_render_rings_长词完整显示不被截断():
+    # Bug2：长词曾被 CSS 裁成 "…"（max-width:130px + overflow:hidden + text-overflow:ellipsis）。
+    # 现改为允许换行完整显示。本测试钉死：不再有截断 CSS，且长词原文完整出现在 HTML 里。
+    from pipeline import render_rings
+    长词 = "Morphological analysis (problem-solving)"
+    html = render_rings({"中心": "Center", "内圈": [长词], "外圈": ["Computational visualistics"]})
+
+    # 按钮截断标志不应再出现（注：body 的 overflow:hidden 是防页面滚动，与截断无关）
+    assert "text-overflow: ellipsis" not in html   # 省略号截断的唯一标志
+    assert "max-width: 130px" not in html          # 旧的裁切宽度
+    # 改为允许换行
+    assert "overflow-wrap: break-word" in html
+    assert "white-space: normal" in html
+    # 长词原文完整在 HTML 中（标签属性 + 文本）
+    assert 长词 in html
+    assert "Computational visualistics" in html
+
+
+def test_loading_page_瞬间反馈且不阻塞():
+    # Bug1 体感修复：加载页是纯字符串、瞬间可生成（不调 get_rings），
+    # 显示起始词 + "正在为…生成" 文案，并自己 fetch('/rings') 去触发真正计算。
+    from pipeline import _loading_page
+    html = _loading_page("Data visualization", "Convolutional neural network")
+    assert "<!DOCTYPE html>" in html and "</html>" in html
+    assert "正在为" in html
+    assert "Data visualization" in html        # 起始词，让用户看见在为它干活
+    assert "fetch('/rings')" in html            # 后台去算真正两圈，算好再替换整页
+
+
 def test_get_rings_节点均来自Wikipedia真实链接():
     # 例子型：CLAUDE.md 红线 2——编排层不能发明节点，
     # 所有返回词条必须是 fetch_neighbors 的真实子集。

@@ -734,8 +734,11 @@ def render_rings(
       position: absolute; transform: translate(-50%,-50%);
       border: none; border-radius: 8px; padding: 6px 10px;
       font-size: 0.72rem; cursor: pointer;
-      white-space: nowrap; max-width: 130px;
-      overflow: hidden; text-overflow: ellipsis;
+      /* 完整显示长词：不裁切、允许换行，极长单词也能断行 */
+      max-width: 150px;
+      white-space: normal;
+      overflow-wrap: break-word;
+      text-align: center; line-height: 1.2;
     }}
     .center-node {{
       background: #7c3aed; color: #fff;
@@ -798,6 +801,65 @@ def render_rings(
 
 
 # ─────────────────────────────────────────────
+# 呈现层：「加载中」过渡页（治冷启动黑屏的体感）
+# ─────────────────────────────────────────────
+
+def _loading_page(word: str, 终点: str = "") -> str:
+    """
+    瞬间可返回的「加载中」页：先让用户看见系统正在为 word 干活（转圈 + 文案），
+    再由页面自身 fetch('/rings') 触发那一步真正的（可能很慢的）计算，
+    拿到结果后原地替换成两圈页面。把冷启动的黑屏等待变成有反馈的等待。
+    """
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>正在生成…</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{ margin: 0; height: 100vh; display: flex;
+            align-items: center; justify-content: center;
+            background: #0f0f1a; color: #e0e0f0;
+            font-family: system-ui, -apple-system, sans-serif; }}
+    .loading {{ text-align: center; }}
+    .spinner {{
+      width: 48px; height: 48px; margin: 0 auto 1.4rem;
+      border: 3px solid rgba(124,58,237,0.25);
+      border-top-color: #7c3aed; border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    .loading p {{ font-size: 1rem; color: #c7c7d9; }}
+    .loading em {{ color: #a5b4fc; font-style: normal; font-weight: bold; }}
+    .dots::after {{ content: ''; animation: dots 1.4s steps(4, end) infinite; }}
+    @keyframes dots {{
+      0% {{ content: ''; }} 25% {{ content: '·'; }}
+      50% {{ content: '··'; }} 75% {{ content: '···'; }}
+    }}
+    .goal {{ position: fixed; top: 0.9rem; right: 1.2rem;
+             font-size: 0.70rem; color: #4b5563; }}
+    .goal em {{ color: #34d399; font-style: normal; }}
+  </style>
+</head>
+<body>
+  <div class="loading">
+    <div class="spinner"></div>
+    <p>正在为 <em>{_esc(word)}</em> 生成可能的路径<span class="dots"></span></p>
+  </div>
+  <div class="goal">目标：<em>{_esc(终点)}</em></div>
+  <script>
+    // 立刻去算真正的两圈；算好后原地替换整页（document.write 会执行新页里的脚本）
+    fetch('/rings')
+      .then(function (r) {{ return r.text(); }})
+      .then(function (html) {{
+        document.open(); document.write(html); document.close();
+      }});
+  </script>
+</body>
+</html>"""
+
+
+# ─────────────────────────────────────────────
 # 呈现层：本地 Web 会话（串联所有层的完整循环）
 # ─────────────────────────────────────────────
 
@@ -806,7 +868,8 @@ def run_session(input_01: str, input_02: str, port: int = 8080) -> None:
     呈现层会话入口：在本地浏览器中从 input_01 交互式地走向 input_02。
 
     路由：
-      GET /          渲染当前词条的两圈（调用 get_rings + render_rings）
+      GET /          瞬间回应：已算好就直接渲染两圈，否则先回「加载中」页
+      GET /rings     真正计算并渲染两圈（get_rings + render_rings，可能较慢）
       GET /choose    接受 ?word=X → save_step → 重定向 /（进入下一轮）
       GET /history   返回 JSON 格式的完整历史记录
 
@@ -861,8 +924,8 @@ def run_session(input_01: str, input_02: str, port: int = 8080) -> None:
                 ).encode("utf-8")
                 self._send(200, "application/json; charset=utf-8", body)
 
-            # ── /：渲染当前两圈 ───────────────────────────────────────
-            else:
+            # ── /rings：真正算两圈（可能很慢，由加载页在后台 fetch）─────────
+            elif parsed.path == "/rings":
                 if state["_cache"] is None:
                     state["_cache"] = get_rings(state["当前"], state["终点"])
                 html = render_rings(
@@ -870,6 +933,18 @@ def run_session(input_01: str, input_02: str, port: int = 8080) -> None:
                     历史=state["路径"],
                     终点=state["终点"],
                 )
+                self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+
+            # ── /：瞬间回应——已算好直接渲染，没算好先回「加载中」页 ──────────
+            else:
+                if state["_cache"] is not None:
+                    html = render_rings(
+                        state["_cache"],
+                        历史=state["路径"],
+                        终点=state["终点"],
+                    )
+                else:
+                    html = _loading_page(state["当前"], state["终点"])
                 self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
 
         def log_message(self, fmt: str, *args) -> None:  # 静默服务器日志
